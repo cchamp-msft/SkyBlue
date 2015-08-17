@@ -1,0 +1,231 @@
+﻿<ManagementPackFragment SchemaVersion="2.0" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <TypeDefinitions>
+    <ModuleTypes>
+      <DataSourceModuleType ID="SkyBlue.TimedPowerShellWriteAction" Accessibility="Public" Batching="false">
+        <Configuration>
+          <xsd:element minOccurs="1" name="IntervalSeconds" type="xsd:integer" />
+          <xsd:element minOccurs="1" name="NoReopenSeconds" type="xsd:integer" />
+          <xsd:element minOccurs="1" name="TimeoutSeconds" type="xsd:integer" />
+          <xsd:element minOccurs="1" name="GenerateAlert" type="xsd:string" />
+          <xsd:element minOccurs="1" name="Debug" type="xsd:string" />
+        </Configuration>
+        <OverrideableParameters>
+          <OverrideableParameter ID="IntervalSeconds" Selector="$Config/IntervalSeconds$" ParameterType="int" />
+          <OverrideableParameter ID="NoReopenSeconds" Selector="$Config/NoReopenSeconds$" ParameterType="int" />
+          <OverrideableParameter ID="TimeoutSeconds" Selector="$Config/TimeoutSeconds$" ParameterType="int" />
+          <OverrideableParameter ID="GenerateAlert" Selector="$Config/GenerateAlert$" ParameterType="string" />
+          <OverrideableParameter ID="Debug" Selector="$Config/Debug$" ParameterType="string" />
+        </OverrideableParameters>
+        <ModuleImplementation Isolation="Any">
+          <Composite>
+            <MemberModules>
+              <DataSource ID="DS" TypeID="System!System.Scheduler">
+                <Scheduler>
+                  <SimpleReccuringSchedule>
+                    <Interval>$Config/IntervalSeconds$</Interval>
+                    <SyncTime />
+                  </SimpleReccuringSchedule>
+                  <ExcludeDates />
+                </Scheduler>
+              </DataSource>
+              <ProbeAction ID="PA" TypeID="Windows!Microsoft.Windows.PowerShellPropertyBagProbe">
+                <ScriptName>SkyBlue.ps1</ScriptName>
+                <ScriptBody>
+                  $api = New-Object -ComObject "MOM.ScriptAPI"
+
+                  $debug="$Config/Debug$"
+                  [int]$interval=$Config/IntervalSeconds$
+                  [int]$noreopen=$Config/NoReopenSeconds$
+
+                  $bag = $api.CreatePropertyBag()
+                  $bagstatus = "GOOD"
+                  $bagdetails = ""
+                  $bagalert = "$Config/GenerateAlert$"
+
+                  # Generate Alert pass-through config, accepts "true" or 1 as enabled. Needs to output "True" for condition detect module.
+                  if ($bagalert -eq "1" -or $bagalert.ToString().ToLower() -eq "true") { $bagalert = "True" }
+
+
+                  $error.clear()
+
+                  $OMCmdletsTest = (Get-Module|%{$_.Name}) -Join " "
+                  If(!$OMCmdletsTest.Contains("OperationsManager")){
+                  $setupKey = Get-Item -Path "HKLM:\Software\Microsoft\Microsoft Operations Manager\3.0\Setup"
+                  $installDirectory = $setupKey.GetValue("InstallDirectory") | Split-Path
+                  $psmPath = $installdirectory + '\Powershell\OperationsManager\OperationsManager.psm1'
+                  Import-Module $psmPath
+                  }
+
+                  # Commented due to PS v2.0 being used for OM's API workspace and it complaining that xplat PS cmdlets need 3.0
+                  #if ($error.count -gt 0) {
+                  #  # If error found, set the flag and log event
+                  #  $api.LogScriptEvent("SkyBlue.ps1", 9990, 0, "Error returned: $error")
+                  #}
+
+                  $d2=(Get-Date).ToUniversalTime().AddSeconds($noreopen*-1)
+                  if (($interval*2+60) -le $noreopen) {
+                  $d=(Get-Date).ToUniversalTime().AddSeconds(($interval+$noreopen)*-2-60)
+                  } else {
+                  $d=(Get-Date).ToUniversalTime().AddSeconds($interval*-2-60)
+                  }
+                  $error.clear()
+                  $alerts=(Get-SCOMAlert -Criteria "ResolutionState = 255 And LastModified &gt; '$d' And LastModified &lt; '$d2' And IsMonitorAlert = 'True' And MonitoringObjectHealthState &lt;&gt; 1 And MonitoringObjectInMaintenanceMode = 0 And LastModifiedBy &lt;&gt; 'System'" | Sort-Object -Descending TimeRaised)
+
+                  if ($error.count -gt 0) {
+                  # If error found, set the flag and log event
+                  if ($debug -eq "1" -or $debug.ToString().ToLower() -eq "true") { $api.LogScriptEvent("SkyBlue.ps1", 9990, 0, "Error returned: $error") }
+                  $bagstatus="BAD"
+                  $bagdetails="Error returned: $error"
+                  }
+
+                  if ($alerts.Count -gt 0) {
+                  foreach ($alert in $alerts) {
+                  $alertCheck = Get-SCOMAlert -Criteria "ResolutionState &lt;&gt; 255 And IsMonitorAlert = 'True' And RuleId = '$($alert.RuleId)' And MonitoringObjectId = '$($alert.MonitoringObjectId)'"
+                  if ($alertCheck.Count -eq 0) {
+                  $alert = Get-SCOMAlert -Id $alert.Id
+                  if (!$alert.MonitoringObjectInMaintenanceMode) {
+                  $alert.ResolutionState = 0
+                  $alert.Update('Sky Blue found a closed alert from a monitor that is not healthy. Changing Resolution State to New. v1.0.4.1')
+                  if ($debug -eq "1" -or $debug.ToString().ToLower() -eq "true"){
+                  if ($alert.MonitoringObjectPath -eq $alert.MonitoringObjectDisplayName) {
+                  $api.LogScriptEvent("SkyBlue.ps1", 9998, 0, "Re-opening alert: $($alert.MonitoringObjectDisplayName) - $($alert.Name)")
+                  } else {
+                  $api.LogScriptEvent("SkyBlue.ps1", 9998, 0, "Re-opening alert: $($alert.MonitoringObjectPath) $($alert.MonitoringObjectDisplayName) - $($alert.Name)")
+                  }
+                  }
+                  } else {
+                  if ($debug -eq "1" -or $debug.ToString().ToLower() -eq "true"){
+                  if ($alert.MonitoringObjectPath -eq $alert.MonitoringObjectDisplayName) {
+                  $api.LogScriptEvent("SkyBlue.ps1", 9998, 0, "Skipping alert due to maint mode: $($alert.MonitoringObjectDisplayName) - $($alert.Name)")
+                  } else {
+                  $api.LogScriptEvent("SkyBlue.ps1", 9998, 0, "Skipping alert due to maint mode: $($alert.MonitoringObjectPath) $($alert.MonitoringObjectDisplayName) - $($alert.Name)")
+                  }
+                  }
+                  }
+                  } else {
+                  if ($debug -eq "1" -or $debug.ToString().ToLower() -eq "true"){
+                  if ($alert.MonitoringObjectPath -eq $alert.MonitoringObjectDisplayName) {
+                  $api.LogScriptEvent("SkyBlue.ps1", 9996, 0, "Skipping duplicate alert: $($alert.MonitoringObjectDisplayName) - $($alert.Name)")
+                  } else {
+                  $api.LogScriptEvent("SkyBlue.ps1", 9996, 0, "Skipping duplicate alert: $($alert.MonitoringObjectPath) $($alert.MonitoringObjectDisplayName) - $($alert.Name)")
+                  }
+                  }
+                  }
+                  }
+                  } else {
+                  if ($debug -eq "1" -or $debug.ToString().ToLower() -eq "true")  { $api.LogScriptEvent("SkyBlue.ps1", 9997, 0, "No alerts found.") }
+                  $bagdetails="No alerts found."
+                  }
+
+                  $bag.AddValue("Status",$bagstatus)
+                  $bag.AddValue("Details",$bagdetails)
+                  $bag.AddValue("GenerateAlert",$bagalert)
+
+                  $bag
+
+                </ScriptBody>
+                <TimeoutSeconds>$Config/TimeoutSeconds$</TimeoutSeconds>
+              </ProbeAction>
+            </MemberModules>
+            <Composition>
+              <Node ID="PA">
+                <Node ID="DS" />
+              </Node>
+            </Composition>
+          </Composite>
+        </ModuleImplementation>
+        <OutputType>System!System.PropertyBagData</OutputType>
+      </DataSourceModuleType>
+    </ModuleTypes>
+  </TypeDefinitions>
+  <Monitoring>
+    <Rules>
+      <Rule ID="SkyBlue.PrimaryRule" Enabled="true" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Custom</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="SkyBlue.TimedPowerShellWriteAction">
+            <IntervalSeconds>300</IntervalSeconds>
+            <NoReopenSeconds>0</NoReopenSeconds>
+            <TimeoutSeconds>60</TimeoutSeconds>
+            <GenerateAlert>true</GenerateAlert>
+            <Debug>false</Debug>
+          </DataSource>
+        </DataSources>
+        <ConditionDetection ID="CD" TypeID="System!System.ExpressionFilter">
+          <Expression>
+            <And>
+              <Expression>
+                <SimpleExpression>
+                  <ValueExpression>
+                    <XPathQuery Type="String">Status</XPathQuery>
+                  </ValueExpression>
+                  <Operator>Equal</Operator>
+                  <ValueExpression>
+                    <Value Type="String">BAD</Value>
+                  </ValueExpression>
+                </SimpleExpression>
+              </Expression>
+              <Expression>
+                <SimpleExpression>
+                  <ValueExpression>
+                    <XPathQuery Type="String">GenerateAlert</XPathQuery>
+                  </ValueExpression>
+                  <Operator>Equal</Operator>
+                  <ValueExpression>
+                    <Value Type="String">True</Value>
+                  </ValueExpression>
+                </SimpleExpression>
+              </Expression>
+            </And>
+          </Expression>
+        </ConditionDetection>
+        <WriteActions>
+          <WriteAction ID="WA" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>
+            <Severity>2</Severity>
+            <AlertMessageId>$MPElement[Name="SkyBlueAlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/Property[@Name='Details']$</AlertParameter1>
+            </AlertParameters>
+            <Suppression>
+              <SuppressionValue>$Target/Property[Type="System!System.Entity"]/DisplayName$</SuppressionValue>
+              <SuppressionValue>$Data/Property[@Name='Details']$</SuppressionValue>
+            </Suppression>
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+    </Rules>
+  </Monitoring>
+  <ConfigurationGroups />
+  <Templates />
+  <PresentationTypes />
+  <Presentation>
+    <StringResources>
+      <StringResource ID="SkyBlueAlertMessage" />
+    </StringResources>
+  </Presentation>
+  <Reporting />
+  <LanguagePacks>
+    <LanguagePack ID="ENU" IsDefault="true">
+      <DisplayStrings>
+        <DisplayString ElementID="SkyBlueAlertMessage">
+          <Name>Sky Blue encountered a problem</Name>
+          <Description>{0}</Description>
+        </DisplayString>
+        <DisplayString ElementID="SkyBlue">
+          <Name>Sky Blue</Name>
+          <Description>Sky Blue Management Pack re-opens closed alerts from monitors that are not healthy.</Description>
+        </DisplayString>
+        <DisplayString ElementID="SkyBlue.PrimaryRule">
+          <Name>Sky Blue Primary Rule</Name>
+          <Description>This rule is responsible for a PowerShell running on the configured interval that will re-open any alerts closed within the past Interval*2 time window, where the alert was raised by a monitor that is still in an unhealthy state. Options include GenerateAlert (generates alert on error condition), and Debug (generates events for each action).</Description>
+        </DisplayString>
+        <DisplayString ElementID="SkyBlue.TimedPowerShellWriteAction">
+          <Name>Sky Blue - Timed PowerShell Write Action</Name>
+          <Description />
+        </DisplayString>
+      </DisplayStrings>
+    </LanguagePack>
+  </LanguagePacks>
+  <Resources />
+</ManagementPackFragment>
