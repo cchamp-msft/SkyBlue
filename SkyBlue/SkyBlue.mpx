@@ -85,7 +85,7 @@
                   $alert = Get-SCOMAlert -Id $alert.Id
                   if (!$alert.MonitoringObjectInMaintenanceMode) {
                   $alert.ResolutionState = 0
-                  $alert.Update('Sky Blue found a closed alert from a monitor that is not healthy. Changing Resolution State to New. v1.0.4.1')
+                  $alert.Update('Sky Blue found a closed alert from a monitor that is not healthy. Changing Resolution State to New.')
                   if ($debug -eq "1" -or $debug.ToString().ToLower() -eq "true"){
                   if ($alert.MonitoringObjectPath -eq $alert.MonitoringObjectDisplayName) {
                   $api.LogScriptEvent("SkyBlue.ps1", 9998, 0, "Re-opening alert: $($alert.MonitoringObjectDisplayName) - $($alert.Name)")
